@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comunicator P2P</title>
+<style>
+  :root {
+    --bg: #14161c; --panel: #1e2129; --line: #2e323d; --text: #e8eaf0;
+    --muted: #8a90a0; --accent: #6c8cff; --ok: #3ecf8e; --warn: #f5a524;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.4 system-ui, sans-serif; min-height: 100vh; }
+  .hidden { display: none !important; }
+  button, input { font: inherit; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+           padding: 10px 16px; cursor: pointer; }
+  button.secondary { background: var(--line); }
+  button.ready { background: var(--ok); }
+  button:disabled { opacity: .5; cursor: default; }
+  input { background: var(--bg); color: var(--text); border: 1px solid var(--line);
+          border-radius: 8px; padding: 10px 12px; width: 100%; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+
+  /* Inicio */
+  #home { max-width: 380px; margin: 10vh auto; padding: 0 16px; display: grid; gap: 16px; }
+  #home h1 { margin: 0; font-size: 26px; }
+  .row { display: flex; gap: 8px; }
+  .sep { text-align: center; color: var(--muted); }
+  #codeInput { text-transform: uppercase; letter-spacing: 3px; }
+  .error { color: var(--warn); min-height: 1.4em; }
+
+  /* Sala */
+  #room { display: grid; grid-template-columns: 1fr 320px; gap: 16px; padding: 16px;
+          height: 100vh; }
+  #main { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+  #side { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+  .code { font: 700 34px/1 ui-monospace, monospace; letter-spacing: 6px; }
+  #players { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  #players li { display: flex; align-items: center; gap: 10px; }
+  .dot { width: 14px; height: 14px; border-radius: 50%; flex: none; }
+  .tag { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .tag.on { color: var(--ok); }
+  #chat { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  #messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px;
+              margin-bottom: 10px; word-break: break-word; }
+  .sys { color: var(--muted); font-style: italic; font-size: 13px; }
+  #status { color: var(--muted); font-size: 13px; }
+  #countdown { font-size: 22px; color: var(--ok); min-height: 1.4em; }
+  #lobbyView { display: grid; gap: 16px; align-content: start; }
+  #gameView { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; }
+  canvas { background: #0d0f13; border: 1px solid var(--line); border-radius: 12px;
+           max-width: 100%; max-height: 100%; }
+
+  @media (max-width: 760px) {
+    #room { grid-template-columns: 1fr; height: auto; }
+    #chat { height: 320px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Pantalla de inicio -->
+<section id="home">
+  <h1>Comunicator P2P</h1>
+  <div class="card" style="display:grid;gap:12px">
+    <label>Tu nombre <input id="nameInput" maxlength="16" placeholder="Jugador"></label>
+    <button id="createBtn">Crear sala nueva</button>
+    <div class="sep">— o —</div>
+    <div class="row">
+      <input id="codeInput" maxlength="6" placeholder="CÓDIGO">
+      <button id="joinBtn" class="secondary">Unirse</button>
+    </div>
+    <div class="error" id="homeError"></div>
+  </div>
+</section>
+
+<!-- Sala: lobby + juego -->
+<section id="room" class="hidden">
+  <div id="main">
+    <div id="lobbyView">
+      <div class="card">
+        <div style="color:var(--muted)">Código de la sala</div>
+        <div class="row" style="align-items:center;margin-top:6px">
+          <div class="code" id="codeLabel"></div>
+          <button class="secondary" id="copyBtn" style="margin-left:auto">Copiar enlace</button>
+        </div>
+        <div id="status" style="margin-top:8px">Buscando compañeros…</div>
+      </div>
+      <div class="card">
+        <ul id="players"></ul>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:16px">
+          <button id="readyBtn">Jugar</button>
+          <div id="countdown"></div>
+        </div>
+      </div>
+    </div>
+    <div id="gameView" class="hidden">
+      <canvas id="canvas" width="960" height="600"></canvas>
+    </div>
+  </div>
+
+  <div id="side">
+    <div class="card hidden" id="gamePlayers"></div>
+    <div class="card" id="chat">
+      <div id="messages"></div>
+      <form id="chatForm" class="row">
+        <input id="chatInput" maxlength="300" placeholder="Escribe un mensaje…" autocomplete="off">
+        <button>Enviar</button>
+      </form>
+    </div>
+  </div>
+</section>
+
+<script type="module">
+import { joinRoom, selfId } from 'https://cdn.jsdelivr.net/npm/trystero@0.26.0/+esm'
+
+const APP_ID = 'comunicator-p2p-v1'
+const COLORS = ['#6c8cff', '#3ecf8e', '#f5a524', '#ef5da8', '#a78bfa', '#22d3ee', '#f87171', '#facc15']
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // sin O/0/I/1 para evitar confusiones
+const W = 960, H = 600, SPEED = 240, RADIUS = 18
+
+const $ = id => document.getElementById(id)
+
+// ---------- Estado ----------
+let room = null
+let roomCode = ''
+const me = { id: selfId, name: '', color: '', ready: false, inGame: false, x: 0, y: 0, dir: 1 }
+const peers = new Map() // peerId -> {name,color,ready,inGame,x,y,tx,ty,dir}
+let actions = {}
+let countdownTimer = null
+
+// ---------- Utilidades ----------
+const store = {
+  get: k => { try { return localStorage.getItem(k) } catch { return null } },
+  set: (k, v) => { try { localStorage.setItem(k, v) } catch {} },
+}
+const randomCode = () => Array.from(crypto.getRandomValues(new Uint8Array(6)))
+  .map(b => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('')
+const cleanCode = s => s.toUpperCase().replace(/[^A-Z0-9]/g, '')
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+
+function addMessage(html, cls = '') {
+  const div = document.createElement('div')
+  if (cls) div.className = cls
+  div.innerHTML = html
+  $('messages').appendChild(div)
+  $('messages').scrollTop = $('messages').scrollHeight
+}
+const sys = text => addMessage(esc(text), 'sys')
+
+// ---------- Inicio ----------
+$('nameInput').value = store.get('name') || ''
+const hashCode = cleanCode(location.hash.slice(1))
+if (hashCode) $('codeInput').value = hashCode
+
+$('createBtn').onclick = () => enterRoom(randomCode())
+$('joinBtn').onclick = () => {
+  const code = cleanCode($('codeInput').value)
+  if (code.length !== 6) return ($('homeError').textContent = 'El código tiene 6 caracteres.')
+  enterRoom(code)
+}
+$('codeInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('joinBtn').click() })
+
+function enterRoom(code) {
+  me.name = $('nameInput').value.trim() || 'Jugador-' + selfId.slice(0, 4)
+  me.color = COLORS[Math.floor(Math.random() * COLORS.length)]
+  store.set('name', me.name)
+  roomCode = code
+  location.hash = code
+
+  $('home').classList.add('hidden')
+  $('room').classList.remove('hidden')
+  $('codeLabel').textContent = code
+
+  // El código hace de id de sala y de contraseña (cifra la señalización)
+  room = joinRoom({ appId: APP_ID, password: code }, code)
+  actions = {
+    hello: room.makeAction('hello'),  // perfil completo
+    chat: room.makeAction('chat'),
+    ready: room.makeAction('ready'),
+    pos: room.makeAction('pos'),
+  }
+
+  room.onPeerJoin = id => {
+    actions.hello.send(profile(), { target: id })
+  }
+  room.onPeerLeave = id => {
+    const p = peers.get(id)
+    if (p) sys(`${p.name} se ha ido`)
+    peers.delete(id)
+    refresh()
+  }
+
+  actions.hello.onMessage = (data, { peerId }) => {
+    const known = peers.has(peerId)
+    const p = peers.get(peerId) || {}
+    Object.assign(p, sanitizeProfile(data))
+    if (!known) { p.tx = p.x; p.ty = p.y; sys(`${p.name} se ha unido`) }
+    peers.set(peerId, p)
+    refresh()
+  }
+  actions.chat.onMessage = (text, { peerId }) => {
+    const p = peers.get(peerId)
+    if (!p || typeof text !== 'string') return
+    addMessage(`<b style="color:${p.color}">${esc(p.name)}:</b> ${esc(text.slice(0, 300))}`)
+  }
+  actions.ready.onMessage = (data, { peerId }) => {
+    const p = peers.get(peerId)
+    if (!p) return
+    p.ready = !!data.ready
+    p.inGame = !!data.inGame
+    refresh()
+  }
+  actions.pos.onMessage = (data, { peerId }) => {
+    const p = peers.get(peerId)
+    if (!p || typeof data?.x !== 'number') return
+    p.tx = data.x; p.ty = data.y; p.dir = data.dir; p.inGame = true
+  }
+
+  window.addEventListener('beforeunload', () => room?.leave())
+  sys(`Sala ${code} creada. Comparte el código con tus compañeros.`)
+  refresh()
+}
+
+const profile = () => ({ name: me.name, color: me.color, ready: me.ready, inGame: me.inGame, x: me.x, y: me.y, dir: me.dir })
+function sanitizeProfile(d) {
+  return {
+    name: String(d?.name ?? '???').slice(0, 16),
+    color: /^#[0-9a-f]{6}$/i.test(d?.color) ? d.color : '#888888',
+    ready: !!d?.ready, inGame: !!d?.inGame,
+    x: Number(d?.x) || 0, y: Number(d?.y) || 0, dir: d?.dir === -1 ? -1 : 1,
+  }
+}
+
+// ---------- Lobby ----------
+$('copyBtn').onclick = async () => {
+  const link = location.href.split('#')[0] + '#' + roomCode
+  try { await navigator.clipboard.writeText(link); $('copyBtn').textContent = '¡Copiado!' }
+  catch { prompt('Copia este enlace:', link) }
+  setTimeout(() => ($('copyBtn').textContent = 'Copiar enlace'), 1500)
+}
+
+$('readyBtn').onclick = () => {
+  // Si ya hay una partida en marcha, entra directamente
+  if ([...peers.values()].some(p => p.inGame)) return startGame()
+  me.ready = !me.ready
+  actions.ready.send({ ready: me.ready, inGame: me.inGame })
+  refresh()
+}
+
+$('chatForm').onsubmit = e => {
+  e.preventDefault()
+  const text = $('chatInput').value.trim()
+  if (!text) return
+  actions.chat.send(text)
+  addMessage(`<b style="color:${me.color}">${esc(me.name)} (tú):</b> ${esc(text)}`)
+  $('chatInput').value = ''
+  if (me.inGame) $('chatInput').blur()
+}
+
+function refresh() {
+  const all = [{ ...me, you: true }, ...peers.values()]
+  const n = all.length
+  $('status').textContent = n === 1
+    ? 'Esperando compañeros… (comparte el código)'
+    : `${n} jugadores conectados`
+
+  $('players').innerHTML = all.map(p => `
+    <li><span class="dot" style="background:${p.color}"></span>
+      ${esc(p.name)}${p.you ? ' <span style="color:var(--muted)">(tú)</span>' : ''}
+      <span class="tag ${p.ready || p.inGame ? 'on' : ''}">${p.inGame ? 'jugando' : p.ready ? 'listo ✓' : 'esperando'}</span>
+    </li>`).join('')
+
+  const gameRunning = [...peers.values()].some(p => p.inGame)
+  $('readyBtn').textContent = gameRunning && !me.inGame ? 'Entrar a la partida' : me.ready ? 'Listo ✓ (cancelar)' : 'Jugar'
+  $('readyBtn').classList.toggle('ready', me.ready)
+
+  $('gamePlayers').innerHTML = all.map(p =>
+    `<div style="display:flex;gap:8px;align-items:center"><span class="dot" style="background:${p.color}"></span>${esc(p.name)}</div>`
+  ).join('')
+
+  // Arranque: cuando todos (incluido yo) están listos, cuenta atrás en cada cliente
+  const allReady = !me.inGame && all.every(p => p.ready)
+  if (allReady && !countdownTimer) startCountdown()
+  if (!allReady && countdownTimer) cancelCountdown()
+}
+
+function startCountdown() {
+  let t = 3
+  $('countdown').textContent = `Empezando en ${t}…`
+  countdownTimer = setInterval(() => {
+    t--
+    if (t > 0) return ($('countdown').textContent = `Empezando en ${t}…`)
+    cancelCountdown()
+    startGame()
+  }, 1000)
+}
+function cancelCountdown() {
+  clearInterval(countdownTimer)
+  countdownTimer = null
+  $('countdown').textContent = ''
+}
+
+// ---------- Juego ----------
+const canvas = $('canvas'), ctx = canvas.getContext('2d')
+const keys = new Set()
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return
+  if (me.inGame && e.key === 'Enter') { e.preventDefault(); $('chatInput').focus(); return }
+  keys.add(e.key.toLowerCase())
+  if (me.inGame && e.key.startsWith('Arrow')) e.preventDefault()
+})
+addEventListener('keyup', e => keys.delete(e.key.toLowerCase()))
+addEventListener('blur', () => keys.clear())
+
+function startGame() {
+  if (me.inGame) return
+  me.inGame = true
+  me.ready = false
+  me.x = 80 + Math.random() * (W - 160)
+  me.y = 80 + Math.random() * (H - 160)
+  actions.ready.send({ ready: false, inGame: true })
+  actions.pos.send({ x: me.x, y: me.y, dir: me.dir })
+  $('lobbyView').classList.add('hidden')
+  $('gameView').classList.remove('hidden')
+  $('gamePlayers').classList.remove('hidden')
+  sys('¡Partida empezada! Muévete con WASD o flechas. Enter para chatear.')
+  refresh()
+  requestAnimationFrame(loop)
+}
+
+let last = performance.now(), lastSent = 0, lastSentPos = ''
+function loop(now) {
+  const dt = Math.min((now - last) / 1000, 0.05)
+  last = now
+
+  // Movimiento local
+  let dx = 0, dy = 0
+  if (keys.has('a') || keys.has('arrowleft')) dx--
+  if (keys.has('d') || keys.has('arrowright')) dx++
+  if (keys.has('w') || keys.has('arrowup')) dy--
+  if (keys.has('s') || keys.has('arrowdown')) dy++
+  if (dx || dy) {
+    const len = Math.hypot(dx, dy)
+    me.x = Math.max(RADIUS, Math.min(W - RADIUS, me.x + dx / len * SPEED * dt))
+    me.y = Math.max(RADIUS, Math.min(H - RADIUS, me.y + dy / len * SPEED * dt))
+    if (dx) me.dir = dx
+  }
+
+  // Envío de posición: máx. 20 veces/s, y un latido cada segundo aunque no te muevas
+  const posKey = `${me.x | 0},${me.y | 0},${me.dir}`
+  if ((posKey !== lastSentPos && now - lastSent > 50) || now - lastSent > 1000) {
+    actions.pos.send({ x: me.x, y: me.y, dir: me.dir })
+    lastSent = now; lastSentPos = posKey
+  }
+
+  // Interpolación de los demás
+  for (const p of peers.values()) {
+    const k = 1 - Math.pow(0.001, dt) // suavizado independiente de los FPS
+    p.x += (p.tx - p.x) * k
+    p.y += (p.ty - p.y) * k
+  }
+
+  draw()
+  requestAnimationFrame(loop)
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H)
+  // Suelo con cuadrícula
+  ctx.strokeStyle = '#1b1e26'
+  ctx.lineWidth = 1
+  for (let x = 0; x <= W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke() }
+  for (let y = 0; y <= H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke() }
+
+  const list = [...peers.values()].filter(p => p.inGame)
+  list.push(me)
+  list.sort((a, b) => a.y - b.y) // los de abajo se dibujan encima
+  for (const p of list) drawCharacter(p, p === me)
+}
+
+function drawCharacter(p, isMe) {
+  const { x, y, color, dir } = p
+  // sombra
+  ctx.fillStyle = 'rgba(0,0,0,.35)'
+  ctx.beginPath(); ctx.ellipse(x, y + RADIUS, RADIUS * .9, RADIUS * .35, 0, 0, Math.PI * 2); ctx.fill()
+  // cuerpo
+  ctx.fillStyle = color
+  ctx.beginPath(); ctx.arc(x, y, RADIUS, 0, Math.PI * 2); ctx.fill()
+  if (isMe) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke() }
+  // ojos mirando hacia donde se mueve
+  for (const ox of [-5, 5]) {
+    ctx.fillStyle = '#fff'
+    ctx.beginPath(); ctx.arc(x + ox + dir * 4, y - 4, 4.5, 0, Math.PI * 2); ctx.fill()
+    ctx.fillStyle = '#111'
+    ctx.beginPath(); ctx.arc(x + ox + dir * 6, y - 4, 2.2, 0, Math.PI * 2); ctx.fill()
+  }
+  // nombre
+  ctx.fillStyle = '#e8eaf0'
+  ctx.font = '600 13px system-ui, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.fillText(p.name + (isMe ? ' (tú)' : ''), x, y - RADIUS - 8)
+}
+</script>
+</body>
+</html>
