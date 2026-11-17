@@ -95,6 +95,10 @@
           <div id="countdown"></div>
         </div>
       </div>
+      <details class="card">
+        <summary style="cursor:pointer">Diagnóstico de conexión</summary>
+        <div id="diag" style="margin-top:10px;font-size:13px"></div>
+      </details>
     </div>
     <div id="gameView" class="hidden">
       <canvas id="canvas" width="960" height="600"></canvas>
@@ -114,9 +118,29 @@
 </section>
 
 <script type="module">
-import { joinRoom, selfId } from 'https://cdn.jsdelivr.net/npm/trystero@0.26.0/+esm'
+import { joinRoom, selfId, getRelaySockets } from 'https://cdn.jsdelivr.net/npm/trystero@0.26.0/+esm'
 
 const APP_ID = 'comunicator-p2p-v1'
+
+// Relays Nostr usados SOLO para que los jugadores se encuentren (intercambio inicial).
+// Mezcla de relays grandes y de los que trae la librería: basta con que UNO
+// en común funcione para ambos jugadores.
+const RELAYS = [
+  'wss://nos.lol',
+  'wss://relay.primal.net',
+  'wss://relay.snort.social',
+  'wss://relay.novospes.com',
+  'wss://relay.nostr.blockhenge.com',
+  'wss://relay.aarpia.com',
+  'wss://nostr.red5d.dev',
+  'wss://relay.bitmacro.cloud',
+]
+
+// Servidores TURN: solo hacen falta si dos jugadores encuentran la sala pero no
+// logran conectarse directamente (NAT estricto / CGNAT / redes de móvil).
+// Ej. Cloudflare TURN (gratis hasta 1 TB/mes):
+// { urls: ['turn:turn.cloudflare.com:3478'], username: '...', credential: '...' }
+const TURN_SERVERS = []
 const COLORS = ['#6c8cff', '#3ecf8e', '#f5a524', '#ef5da8', '#a78bfa', '#22d3ee', '#f87171', '#facc15']
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // sin O/0/I/1 para evitar confusiones
 const W = 960, H = 600, SPEED = 240, RADIUS = 18
@@ -150,7 +174,49 @@ function addMessage(html, cls = '') {
 }
 const sys = text => addMessage(esc(text), 'sys')
 
+// ---------- Diagnóstico ----------
+const diag = { errors: [] }
+async function connectionType(pc) {
+  // Mira qué tipo de ruta usó WebRTC: host = red local, srflx = directo por internet, relay = vía TURN
+  try {
+    const stats = await pc.getStats()
+    let pair
+    stats.forEach(s => { if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') pair = s })
+    if (!pair) return '?'
+    const local = stats.get(pair.localCandidateId)
+    return { host: 'red local', srflx: 'directo (internet)', prflx: 'directo (internet)', relay: 'vía TURN' }[local?.candidateType] || '?'
+  } catch { return '?' }
+}
+async function renderDiag() {
+  if (!room) return
+  let sockets = {}
+  try { sockets = getRelaySockets() } catch {}
+  const relayRows = RELAYS.map(url => {
+    const ws = sockets[url]
+    const st = ws?.readyState
+    const [txt, col] = st === 1 ? ['conectado', 'var(--ok)'] : st === 0 ? ['conectando…', 'var(--warn)'] : ['caído', '#f87171']
+    return `<div><span style="color:${col}">●</span> ${esc(url.replace('wss://', ''))} <span style="color:var(--muted)">— ${txt}</span></div>`
+  })
+  const okCount = RELAYS.filter(u => sockets[u]?.readyState === 1).length
+
+  const pcs = room.getPeers?.() || {}
+  const peerRows = await Promise.all(Object.entries(pcs).map(async ([id, pc]) =>
+    `<div>${esc(peers.get(id)?.name || id.slice(0, 6))}: ${await connectionType(pc)}</div>`))
+
+  $('diag').innerHTML = `
+    <div><b>Relays de emparejamiento:</b> ${okCount}/${RELAYS.length} conectados</div>
+    <div style="margin:4px 0 8px">${relayRows.join('')}</div>
+    <div><b>Conexiones con jugadores:</b> ${peerRows.length || 'ninguna todavía'}</div>
+    ${peerRows.join('')}
+    ${diag.errors.length ? `<div style="color:var(--warn);margin-top:8px"><b>Errores:</b><br>${diag.errors.slice(-5).map(esc).join('<br>')}</div>` : ''}`
+}
+
 // ---------- Inicio ----------
+if (!window.isSecureContext) {
+  $('homeError').innerHTML = '⚠ Esta página no está en un contexto seguro (abierta como <code>http://IP:puerto</code>). ' +
+    'El cifrado no funcionará. Ábrela en <code>localhost</code>, como archivo local o desde una web HTTPS.'
+  $('createBtn').disabled = $('joinBtn').disabled = true
+}
 $('nameInput').value = store.get('name') || ''
 const hashCode = cleanCode(location.hash.slice(1))
 if (hashCode) $('codeInput').value = hashCode
@@ -175,7 +241,26 @@ function enterRoom(code) {
   $('codeLabel').textContent = code
 
   // El código hace de id de sala y de contraseña (cifra la señalización)
-  room = joinRoom({ appId: APP_ID, password: code }, code)
+  try {
+    room = joinRoom({
+      appId: APP_ID,
+      password: code,
+      relayConfig: { urls: RELAYS },
+      ...(TURN_SERVERS.length ? { turnConfig: TURN_SERVERS } : {}),
+    }, code, {
+      onJoinError: ({ peerId, error }) => {
+        const msg = String(error?.message || error)
+        diag.errors.push(msg)
+        sys(`⚠ No se pudo conectar con un jugador (${String(peerId).slice(0, 6)}): ${msg}`)
+        renderDiag()
+      },
+    })
+  } catch (err) {
+    sys('⚠ Error al entrar en la sala: ' + (err?.message || err))
+    return
+  }
+  setInterval(renderDiag, 2000)
+  renderDiag()
   actions = {
     hello: room.makeAction('hello'),  // perfil completo
     chat: room.makeAction('chat'),
